@@ -1,0 +1,480 @@
+---
+title: 'STAT656: Homework 3'
+subtitle: Classification with Logistic Regression and Linear Discriminant Analysis
+output:
+  html_document: default
+---
+When customers leave a company, this is often referred to as 'churn'. Churn is a big concern for many service-oriented businesses as there is a  cost of acquiring new customers, so keeping existing customers is important to keep costs down.  Let's look into predicting whether a customer will churn for a telecommunications company.
+
+Let's load in any required packages here (make sure to install them first)
+```{r loadingPackages, message=FALSE, warning=FALSE}
+require(dplyr)
+require(readr)
+require(caret)
+require(pROC)
+
+set.seed(1)
+
+trainingData = read_csv('trainingData.csv')
+testingData  = read_csv('testingData.csv')
+```
+
+Let's modify the objects somewhat to get a consistent naming convention
+
+```{r}
+Xtrain = select(trainingData, -Churn)
+Xtest  = select(testingData, -Churn)
+Ytrain = select(trainingData, Churn) %>% unlist()
+Ytest  = select(testingData, Churn) %>% unlist()
+```
+
+Let's look at the data structures for the training data:
+
+
+```{r}
+str(Xtrain) 
+#Note: we can put the number of unique values with the data structure:
+rbind(sapply(Xtrain,function(x){ length(unique(x))}),
+      sapply(Xtrain,class))
+str(Ytrain)
+table(Ytrain)
+```
+
+
+
+# Problem 0 (15 pts)
+
+Remember the items that usually need to be checked:
+
+* data structures
+* checking for missing data
+* Converting qualitative features to dummy variables
+* extreme observations
+* transformations
+* correlations
+
+For this assignment, in the interest of keeping it short(er), let's just look at data structures and missing data
+
+## 0.1 Missing data
+
+
+```{r message=FALSE, warning=FALSE}
+#### Answer 0.1.1 Check to see if there are any missing values in the training data
+colSums(is.na(Xtrain))
+#### Answer 0.1.2 Check to see if there are any missing values in the test data
+colSums(is.na(Xtest))
+#### Answer 0.1.3 Make a visualization with the function ggplot_missing of the missing data in Xtrain
+
+ggplot_missing <- function(x){
+	if(!require(reshape2)){warning('you need to install reshape2')}
+	require(reshape2)
+	require(ggplot2)
+	#### This function produces a plot of the missing data pattern
+	#### in x.  It is a modified version of a function in the 'neato' package
+  
+  x %>% 
+    is.na %>%
+    melt %>%
+    ggplot(data = .,
+           aes(x = Var2,
+               y = Var1)) +
+    geom_raster(aes(fill = value)) +
+    scale_fill_grey(name = "",
+                    labels = c("Present","Missing")) +
+    theme_minimal() + 
+    theme(axis.text.x  = element_text(angle=45, vjust=0.5)) + 
+    labs(x = "Variables in Dataset",
+         y = "Rows / observations")
+}
+
+ggplot_missing(Xtrain)
+
+```
+
+It looks like there are just missing values for TotalCharges in both Xtrain and Xtest.  Let's use a linear regression model to impute TotalCharges with MonthlyCharges.  Here is how that would work using the training data
+
+```{r}
+trControl = trainControl(method='none')
+
+imputationScheme = train(TotalCharges~MonthlyCharges, 
+                         data = select(Xtrain,MonthlyCharges, TotalCharges) %>% na.omit, 
+                         method = 'lm', trControl = trControl)
+XtrainImp                 = Xtrain
+M                         = is.na(XtrainImp$TotalCharges)
+XtrainImp$TotalCharges[M] = predict(imputationScheme, 
+                                    select(Xtrain, MonthlyCharges, TotalCharges) %>% filter(M))
+```
+
+Now, we want to impute the test features using the imputation scheme learned using the training features.
+```{r}
+XtestImp = Xtest
+#### Answer 0.1.4 Using 'imputationScheme' from 0.1.3, impute the missing value(s) in Xtest
+####              Don't retrain a new imputation scheme on the test data, just use the training 
+####              imputation scheme
+M = is.na(XtestImp$TotalCharges)
+
+XtestImp$TotalCharges[M] = predict(
+  imputationScheme,
+  select(Xtest, MonthlyCharges, TotalCharges) %>% filter(M)
+)
+
+```
+
+## 0.2 Data structures
+Now, convert the qualitative features and supervisors to factors.  
+
+Hint: you should be on the look out for qualitative features that have too many levels.  Encoding them as factors creates a massive number of dummy variables.  Also, of course, qualitative features that have the wrong data structure e.g. integer or numeric.
+
+```{r}
+XtrainImpFact = select(XtrainImp, -customerID,
+                      -tenure, -MonthlyCharges, -TotalCharges) %>% 
+  mutate_all(factor)
+
+XtestImpFact = select(
+  XtestImp,
+  -customerID,
+  -tenure,
+  -MonthlyCharges,
+  -TotalCharges
+) %>%
+  mutate_all(factor) #### Answer 0.2.1 Convert the character data structures in Xtest to factor
+
+Ytrain   = factor(Ytrain)
+
+Ytest    = factor(Ytest) #### Answer 0.2.2 Convert the character data structures in Ytest to factor
+```
+
+## 0.3 Dummy variables
+
+```{r}
+dummyModel = dummyVars(~ ., data = XtrainImpFact, fullRank = TRUE)
+
+XtrainQualDummy = predict(dummyModel, XtrainImpFact)
+XtestQualDummy  = predict(dummyModel, XtestImpFact)
+```
+
+Let's create the full feature matrices for the training and test set
+```{r}
+XtrainQuan = select(XtrainImp, tenure, MonthlyCharges, TotalCharges)
+XtrainFull = cbind(XtrainQualDummy, XtrainQuan)
+
+XtestQuan  = select(XtestImp, tenure, MonthlyCharges, TotalCharges)
+XtestFull  = cbind(XtestQualDummy, XtestQuan)
+```
+
+## Some additional processing
+
+Note that there is some redundant information in the qualitative features.  Though it isn't really "correlation" (because we are referring to indicator features), we can still use a corrplot to visualize the problem
+
+```{r message=FALSE, warning=FALSE}
+require(corrplot)
+corrplot(cor(XtrainFull), tl.cex = 0.5)
+```
+
+There are qualitative features like "InternetService" and then other qualitative features like "OnlineBackup" which have a level "no internet service".  These new features overlap exactly and hence we need to remove some of them
+
+```{r}
+
+XtrainFull = select(XtrainFull,-contains('.No internet'))
+XtestFull  = select(XtestFull,-contains('.No internet'))
+
+dim(XtrainFull)
+dim(XtestFull)
+
+identical(
+  colnames(XtrainFull),
+  colnames(XtestFull)
+)
+```
+
+
+# Problem 1: Logistic Regression (30 pts)
+
+Let's go through and make a predictive model out of logistic regression
+
+## Train the logistic regression model on the training data
+
+Make sure you are using the trainControl to only train the model by setting method = 'none'.  'train' treats the first level as the event of interest, which is in alphabetical order.  So, 'no' would be the event.  However, we usually want to code results so that the outcome of interest is the event. We can make this adjustment in R via 'relevel' on the supervisor
+
+```{r}
+YtrainRelevel = relevel(Ytrain, ref = 'Yes')
+YtestRelevel  = relevel(Ytest, ref = 'Yes')
+
+trControl    = trainControl(method = 'none')
+outLogistic  = train(x = XtrainFull, y = YtrainRelevel, 
+                   method = 'glm', trControl = trControl)
+```
+
+## Problem 1.2: Get the test predicted probabilities
+
+Get the predicted probabilities for the test data and print out the first few predictions with the 'head' function
+```{r}
+YhatTestProb = predict(
+  outLogistic,
+  XtestFull,
+  type = "prob"
+) #### Answer 1.2.1.
+head(YhatTestProb)
+```
+
+## Problem 1.3: Well-calibrated probabilities
+
+Produce a calibration plot using your predictions of the test Data
+
+```{r}
+calibProbs = calibration(YtestRelevel ~ YhatTestProb$Yes, cuts = 5)
+xyplot(calibProbs)
+```
+
+#### Answer 1.3.1.  Are these well calibrated probabilities?
+
+**The predicted probabilities appear reasonably well calibrated because the observed event percentages generally follow the diagonal reference line, although there is some deviation, particularly for the higher-probability groups.**
+
+## Problem 1.4: The Confusion matrix
+
+Get the classifications now using the default threshold.  
+```{r}
+YhatTest = predict(outLogistic, XtestFull, type = 'raw')
+```
+
+Look at the help file for the function 'confusionMatrix' function. Instead of producing all the output as in the lectures, produce only the confusion matrix, the accuracy rate, kappa, the sensitivity, and the specificity.
+
+```{r}
+confusionMatrixOut = confusionMatrix(reference = YtestRelevel, data = YhatTest)
+
+print(confusionMatrixOut$table)
+
+print(confusionMatrixOut$overall[1:2])
+
+#### Answer 1.4.1
+print(confusionMatrixOut$byClass[c("Sensitivity", "Specificity")])
+```
+
+## Problem 1.5: Produce the ROC curve using the test data
+
+```{r}
+rocCurve = roc(Ytest, YhatTestProb$Yes)
+plot(rocCurve, legacy.axes=TRUE)
+```
+
+#### Answer 1.5.1.  
+
+In no more than 2 sentences, briefly describe this curve.  What the objects are being plotted? What value for the threshold would put a classifier at the point (0,0)?
+
+**The ROC curve plots sensitivity (true positive rate) against 1 − specificity (false positive rate) across different classification thresholds. A threshold of 1 would classify all observations as negative, resulting in sensitivity = 0 and false positive rate = 0, corresponding to the point (0,0).**
+
+
+## Problem 1.6: AUC
+
+We can get a one number summary of the ROC from the 'rocCurve' object: auc
+
+```{r}
+rocCurve$auc
+```
+
+#### Answer 1.6.1
+
+What does the AUC describe? What is a realistic minimum value for the AUC?  Maximum value?
+
+**AUC describes how well the model can distinguish between the two classes across all possible classification thresholds. A realistic minimum AUC is 0.5, which represents random classification, while the maximum is 1.0, which represents perfect discrimination.**
+
+## Problem 1.7: Achieving a particular sensitivity
+
+What is the specificity for a model that has a sensitivity of at least 0.8? What threshold does it occur at?
+
+```{r}
+thresholds = rocCurve$thresholds
+
+eligible = which(rocCurve$sensitivities >= 0.8)
+
+pt8        = eligible[
+  which.max(rocCurve$specificities[eligible])
+] #Answer 1.7.1. Fill in the appropriate value and complete this line to get correct index 
+
+threshold   = thresholds[pt8]
+sensitivity = rocCurve$sensitivities[pt8]
+specificity = rocCurve$specificities[pt8]
+```
+
+The specificity is **`r sprintf("%.4f", specificity)`** at threshold **`r sprintf("%.4f", threshold)`** (sensitivity `r sprintf("%.4f", sensitivity)`).
+
+# Problem 2: Linear Discriminant Analysis (LDA) (20 pts)
+
+Let's do the same thing for LDA.  The code should be nearly identical (hence the power of the 'caret' package).  
+
+## Train the LDA model on the training data
+
+Make sure you are using the trainControl to only train the model by setting method = 'none'.  'train' treats the first level as the event of interest, which is in alphabetical order.  So, 'no' would be the event.  However, we usually want to code results so that the outcome of interest is the event. We can make this adjustment in R via 'relevel' on the supervisor
+
+```{r}
+YtrainRelevel = relevel(Ytrain, ref = 'Yes')
+YtestRelevel  = relevel(Ytest, ref = 'Yes')
+
+trControl = trainControl(method = 'none')
+outLDA    = train(x = XtrainFull, y = YtrainRelevel, 
+                  method = 'lda', trControl = trControl)
+```
+
+## Get the test predicted probabilities
+
+```{r}
+YhatTestProb = predict(outLDA, XtestFull, type = 'prob')
+head(YhatTestProb)
+```
+
+## Problem 2.1: Well-calibrated probabilities
+
+Produce a calibration plot using your predictions of the test Data
+
+```{r}
+calibProbs = calibration(YtestRelevel ~ YhatTestProb$Yes, cuts = 5)
+xyplot(calibProbs)
+```
+
+#### Answer 2.1.1.  Are these well calibrated probabilities?
+
+**Somewhat. The probabilities roughly follow the diagonal but are less well calibrated than logistic regression, especially at the high end, where the 90% bin shows only about 83% observed churn. This is expected since LDA assumes normally distributed features, which the dummy variables violate.**
+
+## Problem 2.2: The Confusion matrix
+
+Get the classifications now using the default threshold.  
+```{r}
+YhatTest = predict(outLDA, XtestFull, type = 'raw')
+```
+
+Look at the help file for the function 'confusionMatrix' function. Instead of producing all the output as in the lectures, produce only the confusion matrix, the accuracy rate, kappa, the sensitivity, and the specificity.
+
+```{r}
+#### Answer 2.2.1
+confusionMatrixOut = confusionMatrix(
+  reference = YtestRelevel,
+  data = YhatTest
+)
+
+# Confusion matrix
+print(confusionMatrixOut$table)
+
+# Accuracy and Kappa
+print(confusionMatrixOut$overall[c("Accuracy", "Kappa")])
+
+# Sensitivity and Specificity
+print(confusionMatrixOut$byClass[c("Sensitivity", "Specificity")])
+```
+
+## Produce the ROC curve using the test data
+
+```{r}
+
+rocCurve = roc(Ytest, YhatTestProb$Yes)
+plot(rocCurve, legacy.axes = TRUE)
+
+```
+
+## Problem 2.3: AUC
+
+Get the AUC for LDA
+
+```{r}
+#### Answer 2.3.1
+rocCurve$auc
+```
+
+## Problem 2.4: Achieving a particular sensitivity
+
+What is the specificity for a model that has a sensitivity as close to .8 as we can make it in this problem? What threshold does it occur at?
+  
+```{r}
+#### Answer 2.4.1. 
+pt8LDA = which.min(abs(rocCurve$sensitivities - 0.8))
+
+thresholdLDA   = rocCurve$thresholds[pt8LDA]
+sensitivityLDA = rocCurve$sensitivities[pt8LDA]
+specificityLDA = rocCurve$specificities[pt8LDA]
+```
+
+The threshold is **`r sprintf("%.4f", thresholdLDA)`**.
+
+The sensitivity is **`r sprintf("%.4f", sensitivityLDA)`**.
+
+The specificity is **`r sprintf("%.4f", specificityLDA)`**.
+
+# Problem 3: Comparison (35 pts)
+
+For this problem, you can either adjust the previous object names so that the correct information is printed here (this would be a great idea) or (as I did in the solutions to make the code look as similar between logistic and lda as possible) you can just write in the relevant information.  Report your answers to at least 4 digits after the decimal.
+
+``` {r saveBothModel}
+# Logistic Regression
+YhatLogistic = predict(outLogistic, XtestFull, type = "raw")
+YhatLogisticProb = predict(outLogistic, XtestFull, type = "prob")
+
+cmLogistic = confusionMatrix(
+  reference = YtestRelevel,
+  data = YhatLogistic
+)
+
+rocLogistic = roc(YtestRelevel, YhatLogisticProb$Yes, 
+                  levels = c("No", "Yes"), direction = "<")
+
+
+# LDA
+YhatLDA = predict(outLDA, XtestFull, type = "raw")
+YhatLDAProb = predict(outLDA, XtestFull, type = "prob")
+
+cmLDA = confusionMatrix(
+  reference = YtestRelevel,
+  data = YhatLDA
+)
+
+rocLDA = roc(YtestRelevel, YhatLDAProb$Yes,
+             levels = c("No", "Yes"), direction = "<")
+```
+
+#### Answer 3.1: What are the models's accuracies? Which model would you prefer based on accuracy?
+
+```{r extractAccuracy}
+accuracyLogistic = cmLogistic$overall["Accuracy"]
+accuracyLDA = cmLDA$overall["Accuracy"]
+
+accuracyLogistic
+accuracyLDA
+```
+
+The logistic regression accuracy is `r round(accuracyLogistic, 4)` and 
+the LDA accuracy is `r round(accuracyLDA, 4)`. Based on accuracy, I would
+prefer **`r ifelse(accuracyLogistic > accuracyLDA, "logistic regression", "LDA")`** because it has the higher accuracy.
+
+
+#### Answer 3.2: What are the models's AUCs? Which model would you prefer based on AUC?
+
+``` {r extractAUC}
+aucLogistic = as.numeric(rocLogistic$auc)
+aucLDA = as.numeric(rocLDA$auc)
+
+aucLogistic
+aucLDA
+```
+
+The logistic regression AUC is `r round(aucLogistic, 4)` and the LDA AUC is
+`r round(aucLDA, 4)`. Based on AUC, I would prefer
+**`r ifelse(aucLogistic > aucLDA, "logistic regression", "LDA")`**
+because it has better overall ability to discriminate between churners and
+non-churners across classification thresholds.
+
+
+#### Answer 3.3: What are the models's specificities? Which model would you prefer based on this?
+
+``` {r extractSpecificity}
+specificityLogistic = cmLogistic$byClass["Specificity"]
+specificityLDADefault = cmLDA$byClass["Specificity"]
+
+specificityLogistic
+specificityLDADefault
+```
+
+The logistic regression specificity is `r round(specificityLogistic, 4)` and
+the LDA specificity is `r round(specificityLDADefault, 4)`. Based on specificity,
+I would prefer
+**`r ifelse(specificityLogistic > specificityLDADefault, "logistic regression", "LDA")`**
+because it is better at correctly identifying customers who do not churn.
+
+At a sensitivity of about 0.8, the logistic regression specificity is `r sprintf("%.4f", specificity)` (threshold `r sprintf("%.4f", threshold)`) and the LDA specificity is `r sprintf("%.4f", specificityLDA)` (threshold `r sprintf("%.4f", thresholdLDA)`), so **`r ifelse(specificity > specificityLDA, "logistic regression", "LDA")`** is preferred at a matched sensitivity as well.
