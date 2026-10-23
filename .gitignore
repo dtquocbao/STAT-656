@@ -1,0 +1,23 @@
+# R caches and session files
+*_cache/
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Data files
+*.Rdata
+*.RData
+*.rds
+*.csv
+*.tsv
+database/
+
+# Downloaded / extracted flight reports
+*.zip
+T_ONTIME_REPORTING_*/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
