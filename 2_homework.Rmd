@@ -1,0 +1,369 @@
+---
+title: 'STAT656: Homework 2'
+subtitle: 
+output:
+  html_document: default
+---
+
+Let's load in any required packages here
+```{r loadingPackages, message=FALSE, warning=FALSE}
+require(dplyr)
+require(caret)
+require(doParallel)
+```
+
+We should have our saved R object from Homework 1, which I have titled 2023flights.Rdata.  Either change the pathname in the load statement or copy the file to the directory this Rmd file is in.
+
+```{r loadData}
+load('2023flights.Rdata')
+flightsNotCancelled = df %>%
+  filter(CANCELLED == 0) %>% 
+  na.omit
+```
+
+In order to speed up some computations for the purposes of this homework, let's go ahead and subsample from the entire database of flights.  Note that this is a typical path taken in industry, particularly when developing new products/methods. (You can subsample more or fewer observations as your computer allows)
+
+Lastly, it is a good practice to clean up large objects in R's memory if you are not going to reference them again (or have them available on the hard drive to load in later).
+
+```{r subsample}
+set.seed(1)
+nTotal = nrow(flightsNotCancelled)
+flightsNotCancelled = flightsNotCancelled[sample(1:nTotal,round(nTotal/2)),]
+
+# Let's clean up the name space to free up memory
+rm(df)
+```
+
+# Problem 1. The bootstrap (50 points)
+
+Suppose we want to estimate the difference in the mean 'arrival delay' of flights between the winter and the summer.  **Let's define October through March as the winter and April through September the summer.**
+
+
+## 1.1. Using normality assumption 
+Here, we will apply the classic "pooled two sample t-test" for testing the population means between two groups.  We won't go over this test explicitly in this course.  I'm presuming you have seen it before in one of your earlier classes. If you haven't seen it before, now is a good time!
+
+### 1.1.1. Getting the difference in sample means
+**Get the sample means for these two groups, the sample variances for each group, and the sample size for each group**
+
+```{r problem11}
+winter = flightsNotCancelled %>% 
+  filter(MONTH >= 10 | MONTH <= 3) %>% 
+  summarise(mean = mean(ARR_DELAY), var = var(ARR_DELAY), n = n())
+summer = flightsNotCancelled %>%
+  filter(MONTH >= 4 & MONTH <= 9) %>%
+  summarise(mean = mean(ARR_DELAY), var = var(ARR_DELAY), n = n())
+
+winterMinusSummer = winter$mean - summer$mean 
+```
+
+#### Answer 1.1.1.2
+The sample mean difference between winter and summer is **`r round(winterMinusSummer, 3)`** minutes.
+
+### 1.1.2. Getting the pooled variance
+
+Getting the pooled sample variance and the quantile from the t-distribution, we can get the pooled two-sample t-test confidence interval
+```{r problem11ttest}
+winterMinusSummer = winter$mean - summer$mean
+n                 = winter$n + summer$n
+pooledVar         = ((winter$n - 1)*winter$var + (summer$n - 1)*summer$var)/(n - 2)
+tQuantile         = qt(1-0.05/2,n-2)
+
+winterMinusSummerSE = sqrt(pooledVar)*sqrt(1/winter$n + 1/summer$n)
+normalCI            = c(winterMinusSummer - tQuantile * winterMinusSummerSE,
+                        winterMinusSummer + tQuantile * winterMinusSummerSE)
+```
+
+#### Answer 1.1.2.1
+
+**Provide an interpretation of this confidence interval.** To interpret a confidence interval, state the level of confidence, the end points of the interval, and what population parameter we are estimating with that interval.
+
+=> We are 95% confident that the difference between the population mean 
+arrival delay in winter and the population mean arrival delay in summer 
+(winter - summer) is between **`r round(normalCI[1], 3)` and 
+`r round(normalCI[2], 3)`** minutes.
+
+## 1.2. Using bootstrap
+
+Let's do 21 bootstrap draws and compare the confidence interval (we should do a lot more, but this is a HW afterall).  We could use caret, but that allocates all the bootstrap draws at once, which takes a lot of memory for this problem.  We can use 'sample' instead.  Note that with this many observations, we won't need to worry about stratified sampling over season.
+
+```{r bootstrapSequential, cache = TRUE}
+nBootstrapDraws = 21 #### Answer 1.2.1 Note, I recommend setting this to 1 or 2  until you decide you've got the code right.  Then use the requested number
+  
+bootstrapResults = rep(0,nBootstrapDraws)
+srt = proc.time()[3]
+for(b in 1:nBootstrapDraws){
+  flightsNotCancelled_boot = flightsNotCancelled[sample(1:nrow(flightsNotCancelled),nrow(flightsNotCancelled),replace=TRUE), ]  
+  #### Answer 1.2.2 compute the two sample means
+  winterMean_boot = flightsNotCancelled_boot %>%
+  filter(MONTH >= 10 | MONTH <= 3) %>%
+  summarise(mean = mean(ARR_DELAY))
+
+  summerMean_boot = flightsNotCancelled_boot %>%
+    filter(MONTH >= 4 & MONTH <= 9) %>%
+    summarise(mean = mean(ARR_DELAY))
+  
+  bootstrapResults[b] = winterMean_boot$mean - summerMean_boot$mean #### Answer 1.2.3 compute the sample mean difference
+}
+end = proc.time()[3]
+
+bootstrapCI = quantile(
+  bootstrapResults,
+  probs = c(0.025, 0.975)
+)#### Answer 1.2.4. 
+  
+#again, let's clean up a bit to keep our memory fresh(er)
+rm(flightsNotCancelled_boot)
+```
+
+A 95% bootstrap confidence interval would be **(`r round(bootstrapCI[1],3)`, `r round(bootstrapCI[2],3)`)**.  This took **`r end - srt`** seconds to compute.
+
+The bootstrap interval **(`r round(bootstrapCI[1],3)`, `r round(bootstrapCI[2],3)`)** is very close to the pooled t-interval **(`r round(normalCI[1], 3)`, `r round(normalCI[2], 3)`)**. Both exclude zero, so winter arrival delays average about **`r round(winterMinusSummer, 3)`** minutes less than summer delays. The bootstrap interval is slightly narrower, but with only **`r nBootstrapDraws`** draws its percentile endpoints are imprecise.
+
+Now, let's parallelize this so that it will run faster (note that in this example with such a small number of bootstrap iterations, it may not actually run faster on your computer. This is especially if you have other processes running (like a browser open, for example).  This is ok for this assignment)
+
+```{r ncores}
+nCores = detectCores()
+nCores
+```
+This system has `r nCores` cores.  However, the data set takes up a fair amount of memory
+
+```{r memory}
+format(object.size( flightsNotCancelled ),units='MB')
+```
+
+If you have a lot of cores on your system, **you might want to limit the cluster to 3 (If you have fewer than 3 cores, then just choose that many).** Note that I have to re-require(dplyr) inside the parallel call.  This is due to the fact that a new R session is created at each core.
+
+```{r bootstrapParallel, cache = TRUE}
+cl = makeCluster(3)
+registerDoParallel(cl)
+
+srt = proc.time()[3]
+#### Answer 1.2.5 put the parallel for loop call here
+bootstrapResultsParallel = foreach(
+  b = 1:nBootstrapDraws,
+  .combine = c
+) %dopar% {
+  
+  require(dplyr)
+  
+  flightsNotCancelled_boot = flightsNotCancelled[sample(1:nrow(flightsNotCancelled),nrow(flightsNotCancelled),replace=TRUE), ]  
+  
+  winter = flightsNotCancelled_boot %>% 
+    filter(MONTH >= 10 | MONTH <= 3) %>% 
+    summarise(mean = mean(ARR_DELAY))
+  
+  summer = flightsNotCancelled_boot %>% 
+    filter(MONTH >= 4 & MONTH <= 9) %>% 
+    summarise(mean = mean(ARR_DELAY)) #### Answer 1.2.6
+  
+  winter$mean - summer$mean
+}
+
+end = proc.time()[3]
+
+stopCluster(cl)
+registerDoSEQ()# This returns the session to "serial" instead of "parallel"
+```
+
+This took **`r end - srt`** seconds to compute.
+
+# Problem 2. Measuring performance in multiple linear regression (50 points)
+
+Here, we are going to build onto the example we started in class in 'Caret Package Intro'. In that example, we looked at the sample mean.  Now, we are going to examine the multiple linear regression model. It is not essential to have a lot of experience with this topic to do this homework, though I'm assuming everyone has seen it before in some capacity.  We will discuss this method further later in the class.
+
+Let's process the data similarly to last time, keeping DEP_DELAY and ARR_DELAY
+
+```{r problem2}
+rm(list=ls())# Just to clean up the memory again
+
+load('2023flights.Rdata')
+flightsNotCancelled = df %>%
+  filter(CANCELLED == 0) %>%
+  select(ARR_DELAY,DEP_DELAY) %>%
+  na.omit()
+
+rm(df)
+```
+
+## 2.1 Training/Validation/Test Split
+
+Let's get a training/validation/test split for evaluating our regression model's performance.  Split the data into 50% train and 25% validation and 25% test.  **Follow the code and object naming convention in caretPackage.rmd**
+
+```{r problem21split}
+#### Answer 2.1.1
+set.seed(1)
+
+trainIndex = createDataPartition(
+  flightsNotCancelled$ARR_DELAY,
+  p = .5,
+  list = FALSE
+) %>% as.vector
+
+validSplit = createDataPartition(
+  flightsNotCancelled$ARR_DELAY[-trainIndex],
+  p = .5,
+  list = FALSE
+) %>% as.vector
+
+n          = nrow(flightsNotCancelled)
+testIndex  = (1:n)[-trainIndex][-validSplit]
+validIndex = (1:n)[-trainIndex][validSplit]
+
+role = rep(NA, n)
+
+role[trainIndex] = 'train'
+role[validIndex] = 'validation'
+role[testIndex] = 'test'
+```
+
+## 2.2. Do early departures matter?
+
+We want to start to think about choosing features in a principled manner. Let's compare
+using the raw DEP_DELAY to DEP_DELAY with the negative numbers truncated at zero, we will call DEP_DELAY_TRUNC. **First, we created a new variable in the existing dataframe.**
+  
+```{r}
+flightsNotCancelled = flightsNotCancelled %>% 
+  mutate(DEP_DELAY_TRUNC = pmax(DEP_DELAY, 0)) #### Answer 2.2.1
+```
+
+The fundamental idea behind data splitting is to not use the same data for multiple purposes, which could lead to use getting overly optimistic results.
+
+Hence, we want to do the following:
+* compute the both models using the training data
+* choose which model you prefer using the validation data by comparing the squared error
+* then use the test data to get a good estimate of the test error.
+
+### Training data
+
+```{r problem22training}
+Xtrain      = data.frame(X = flightsNotCancelled$DEP_DELAY[role == 'train'])
+XtruncTrain = data.frame(X = flightsNotCancelled$DEP_DELAY_TRUNC[role == 'train'])
+Ytrain      = flightsNotCancelled$ARR_DELAY[role == 'train']
+
+lmOut      = lm(Ytrain ~ ., data = Xtrain)
+lmTruncOut = lm(Ytrain ~ ., data = XtruncTrain)
+```
+
+### Validation data
+
+```{r problem22validation}
+Xvalid      = data.frame(X = flightsNotCancelled$DEP_DELAY[role == 'validation'])
+XtruncValid = data.frame(
+  X = flightsNotCancelled$DEP_DELAY_TRUNC[role == 'validation']
+)### Answer 2.2.2
+
+Yvalid      = flightsNotCancelled$ARR_DELAY[role == 'validation']
+
+Yhat       = predict.lm(lmOut, Xvalid)
+YtruncHat  = predict.lm(lmTruncOut, XtruncValid) ### Answer 2.2.3
+  
+validSqError = list('original' = sum( (Yhat - Yvalid)**2 ),
+                    'truncated' = sum( (YtruncHat - Yvalid)**2 ))
+
+```
+
+#### Answer 2.2.4 
+
+Is the original or truncated feature better?
+
+- Original feature: `r format(round(validSqError$original, 3), big.mark = ",")`
+- Truncated feature: `r format(round(validSqError$truncated, 3), big.mark = ",")`
+
+The **`r ifelse(validSqError$original < validSqError$truncated, "original", "truncated")` feature** is better because it has the lower validation squared error.
+
+#### Answer 2.2.5
+We just used the validation data for an important purpose.  **Explain what that purpose is and why we should appeal to test data now for getting a fair estimate of the test error (hint: imagine we just compared thousands of models to each other instead of just 2)**
+
+=> The validation data were used to compare the two models and select the model with the smaller squared error. Because the validation data were used for model selection, their performance is no longer an independent estimate of test performance. If we compared thousands of models, we could eventually select one that performs especially well on the validation data partly by chance. Therefore, we use the untouched test data to obtain a fair estimate of how the selected model will perform on new, unseen data.
+  
+### 2.2.1 Test data
+  
+Now, we can get a fair estimate of the test error 
+```{r problem22test}
+Xtest      = data.frame(X = flightsNotCancelled$DEP_DELAY[role == 'test'])
+Ytest      = flightsNotCancelled$ARR_DELAY[role == 'test']
+
+Yhat       = predict.lm(lmOut, Xtest)
+
+testSqError = sum((Yhat - Ytest)**2)
+```
+
+#### Answer 2.2.6
+
+What is the estimate of the test squared error using the test data?
+  
+It is **`r format(round(testSqError, 2), big.mark = ",")`**.
+
+## Problem 3. Extra Credit (10 pts for totally done/correct.  No partial credit)
+
+We will be computing the coefficient of determination (i.e. R squared) for both these features (DEP_DELAY and DEP_DELAY_TRUNC) and using the training/validation/test sets for different purposes.
+
+Analogously to the previous problem, compute both models using the training data, choose which model you prefer using R squared on the validation data, and then use the test data to get a good estimate of the true R squared.
+
+***Answer***
+In Problem 2, we used squared error, where smaller is better. Here we use \(R^2\), where larger is better.
+
+### Training data
+
+```{r problem3training}
+Xtrain      = data.frame(X = flightsNotCancelled$DEP_DELAY[role == 'train'])
+XtruncTrain = data.frame(X = flightsNotCancelled$DEP_DELAY_TRUNC[role == 'train'])
+Ytrain      = flightsNotCancelled$ARR_DELAY[role == 'train']
+
+lmOut      = lm(Ytrain ~ ., data = Xtrain)
+lmTruncOut = lm(Ytrain ~ ., data = XtruncTrain)
+```
+
+### Validation data
+
+```{r problem3validation}
+Xvalid      = data.frame(X = flightsNotCancelled$DEP_DELAY[role == 'validation'])
+XtruncValid = data.frame(
+  X = flightsNotCancelled$DEP_DELAY_TRUNC[role == 'validation']
+)
+
+Yvalid      = flightsNotCancelled$ARR_DELAY[role == 'validation']
+
+Yhat       = predict.lm(lmOut, Xvalid)
+YtruncHat  = predict.lm(lmTruncOut, XtruncValid)
+  
+validR2 = list(
+  'original' = 1 - sum((Yvalid - Yhat)^2) /
+    sum((Yvalid - mean(Yvalid))^2),
+  
+  'truncated' = 1 - sum((Yvalid - YtruncHat)^2) /
+    sum((Yvalid - mean(Yvalid))^2)
+)
+
+bestModel = names(which.max(unlist(validR2)))
+
+```
+
+### Test data
+Now, we can get a fair estimate of the test error 
+```{r problem3test}
+Xtest = data.frame(
+  X = flightsNotCancelled$DEP_DELAY[role == 'test']
+)
+
+Ytest = flightsNotCancelled$ARR_DELAY[role == 'test']
+
+Yhat = predict.lm(lmOut, Xtest)
+
+testR2 = 1 - sum((Ytest - Yhat)^2) /
+  sum((Ytest - mean(Ytest))^2)
+```
+
+The estimated test R-squared for the selected model **(`r bestModel`)** is **`r round(testR2, 4)`**.
+
+### Result
+- Original feature: `r format(round(validR2$original, 4),big.mark=",")`
+- Truncated feature: `r format(round(validR2$truncated, 4),big.mark=",")`
+
+The **`r ifelse(validR2$original > validR2$truncated,
+"original", "truncated")` feature** is preferred because it has the
+higher validation R-squared.
+
+
+
+
