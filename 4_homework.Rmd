@@ -1,0 +1,387 @@
+---
+title: "STAT656: Homework 4"
+subtitle: ''
+output: html_document
+---
+
+# Introduction
+
+A major issue with antiretroviral drugs is the mutation of the virus' genes.  Because of its high rate of replication ($10^9$ to $10^{10}$ virus per person per day) and error-prone
+polymerase\footnote{An enzyme that `stitches' back together DNA or RNA after replication}, HIV can 
+easily develop mutations that alter susceptibility to antiretroviral drugs.
+The emergence of resistance to one or more antiretroviral drugs is one of the more
+common reasons for therapeutic failure in the treatment of HIV.
+
+In the paper 'Genotypic predictors of human immunodeficiency virus type 1 drug resistance'\footnote{Try to see what you can get out of it if you have the time.}, 
+a sample of in vitro\footnote{Latin for `in glass', sometimes known colloquially as a test tube}
+HIV viruses were grown and exposed to a particular antiretroviral therapy.  We have a measurement which is the susceptibility of the virus  to treatment, in which larger values indicate less susceptible. It has been log transformed.   As well, we have whether there is a genetic mutation on each of 208 genes for each virus (each virus is a different row or observation). It is composed of 0's and 1's, with a 1 indicating a mutation in a particular gene.  
+
+# Problem 1 (10 pts)
+
+```{r}
+load("hiv.rda")
+
+X = hiv.train$x
+Y = hiv.train$y
+
+geneLabels = colnames(X)
+```
+
+## Problem 1.1
+
+What are n and p in this problem?
+  
+#### Answer 1.1.1.
+```{r}
+n = nrow(X)
+p = ncol(X)
+```
+
+The number of observations is **`r n`** and the number of features is **`r p`**.
+
+#### Answer 1.1.2.
+
+What are the features in this problem?  What are the observations? What is the supervisor? What do larger values for the supervisor indicate in terms of susceptibility?
+
+**Answer 1.1.2**
+
+**Features (X)**: the `r p` binary indicators representing genetic mutations. A value of 1 means a mutation is present, and 0 means it is absent.
+
+**Observations**: Individual HIV virus samples (`r n` rows). Each row represents a different virus.
+
+**Supervisor (Y)**: The log-transformed susceptibility measurement for the antiretroviral treatment.
+
+**Interpretation**: Larger values of \(Y\) indicate greater drug resistance, meaning the virus is less susceptible to treatment.
+
+# Problem 2 (10 pts)
+  
+Consider the feature matrix X.  Look at the output for the following chunk of code.
+```{r}
+table(X)
+```
+
+#### Answer 2.1
+
+What do these results indicate?
+
+**Answer 2.1**
+
+
+```{r problem2}
+mutationCounts = table(X)
+totalEntries   = length(X)
+
+zeroCount = unname(mutationCounts["0"])
+oneCount = unname(mutationCounts["1"])
+
+zeroPct = 100 * zeroCount / totalEntries
+onePct = 100 * oneCount / totalEntries
+```
+
+The feature matrix contains **`r format(zeroCount, big.mark = ",")`** zeros (**`r round(zeroPct, 2)`%**) and **`r format(oneCount, big.mark = ",")`** ones (**`r round(onePct, 2)`%**).
+
+Since 0 indicates no mutation and 1 indicates a mutation, the majority of genetic positions across the HIV samples do not have mutations.
+
+The dataset is **`r if (zeroPct > 90) "highly sparse" else if (zeroPct > 50) "predominantly zero-valued" else "not predominantly zero-valued"`**, with approximately **`r round(zeroPct, 2)`%** of its entries equal to zero. A sparse-matrix representation may therefore reduce memory usage.
+
+# Problem 3 (10 pts)
+  
+The supervisor is the log transformed susceptibility of a virus to the considered treatment, with large values indicating the virus is relatively more resistant (that is, not susceptible).
+
+```{r}
+hist(Y,
+     main = "Distribution of HIV Drug Susceptibility",
+     xlab = "Log-transformed susceptibility",
+     ylab = "Frequency")
+
+# Summary statistics
+yMean = mean(Y)
+yMedian = median(Y)
+ySd = sd(Y)
+yMin = min(Y)
+yMax = max(Y)
+
+yQ1 = quantile(Y, 0.25)
+yQ3 = quantile(Y, 0.75)
+
+# Calculate sample skewness
+ySkewness = mean((Y - yMean)^3) /
+              mean((Y - yMean)^2)^(3/2)
+
+# Descriptive summary
+summary(Y)
+```
+
+#### Answer 3.1
+
+What do these results indicate? (Note that even though the supervisor doesn't look symmetric, we will still apply elastic net to it, as did the authors in that paper I included.  We won't consider further transformations of the supervisor)
+
+
+**Answer 3.1**
+
+The histogram shows the distribution of log-transformed HIV drug susceptibility. The response variable ranges from **`r round(yMin, 2)`** to **`r round(yMax, 2)`**, with a mean of **`r round(yMean, 2)`** and a median of **`r round(yMedian, 2)`**. The sample skewness is **`r round(ySkewness, 2)`**, but this near-zero value is misleading: the histogram is **bimodal**, not symmetric. One cluster of viruses sits near 0 (susceptible) and another sits near the top of the range (resistant). Q1 (**`r round(yQ1, 2)`**) and Q3 (**`r round(yQ3, 2)`**) fall in the two clusters, while the median lies in the gap between them. The skewness is near zero only because the two clusters balance each other.
+
+The minimum and maximum equal $\log_{10}(0.5)$ and $\log_{10}(300)$, suggesting a base-10 log and a possible upper assay limit, since many values pile up near the maximum. Larger values indicate greater resistance, so the right-hand cluster represents largely resistant viruses.
+
+Even though the response is bimodal, linear regression does not require the marginal response to be normal. The relevant assumptions concern the conditional relationship and the model errors.
+
+# Problem 4 (70 pts)
+
+We may have (at least) two goals with a data set such as this: 
+  
+  * inference: can we find some genes whose mutation seems to be most related to viral susceptibility?
+  * prediction: can we make a model that would predict whether this therapy would be efficacious, given a virus 
+with a set of genetic mutations
+
+
+## Problem 4.1. Inference
+
+Find the estimated coefficient vectors for the following procedures
+
+* lasso
+* refitted lasso 
+
+
+### Problem 4.1.1.  Lasso
+
+Now, find the CV minimizing lasso solution
+
+#### Answer 4.1.1. 
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(656)
+
+# Use the same 10 folds for model comparisons
+foldid = sample(rep(1:10, length.out = nrow(X)))
+
+require(glmnet)
+lassoOut     = cv.glmnet(X ,Y, alpha=1, standardize = FALSE, foldid = foldid) #Consider why we wouldn't standardize
+betaHatLasso = as.vector(coef(lassoOut, s="lambda.min"))
+Slasso       = which(betaHatLasso[-1] != 0)
+
+# Summarize results
+cat("Optimal lambda:", lassoOut$lambda.min, "\n")
+cat("Number of selected features:", length(Slasso), "\n")
+cat("Selected genes:", geneLabels[Slasso], "\n")
+
+# Nonzero lasso coefficients
+lassoCoefs = setNames(betaHatLasso, c("(Intercept)", geneLabels))
+round(lassoCoefs[lassoCoefs != 0], 4)
+```
+
+We do not standardize because every feature is a 0/1 mutation indicator, so all features are already on the same scale. Standardizing would divide each column by its SD; rare mutations have small SDs, so their coefficients would effectively be penalized less. Leaving them unstandardized keeps the penalty equal across mutations.
+
+The Lasso model was fitted using cross-validation to select the penalty parameter that minimizes estimated prediction error. The optimal penalty parameter is **`r signif(lassoOut$lambda.min, 4)`**. At this value, Lasso selected **`r length(Slasso)`** out of
+**`r ncol(X)`** mutation features with nonzero coefficients. The remaining **`r ncol(X) - length(Slasso)`** feature coefficients were shrunk to zero.
+
+### Problem 4.1.2.  Refitted lasso
+
+Now, find the refitted lasso using the '1 standard error rule' lambda and refitting with least squares. I've included a plot of CV so that you can see the lambda.1se solution.
+
+#### Answer 4.1.2. 
+
+```{r}
+plot(lassoOut)
+betaHatTemp     = as.vector(coef(lassoOut, s="lambda.1se"))
+Srefitted       = which(betaHatTemp[-1] != 0)
+Xdf             = as.data.frame(X[,Srefitted, drop=FALSE])
+refittedOut     = lm(Y ~ ., data=Xdf)
+betaHatRefitted = coef(refittedOut)
+```
+
+```{r problem4_1_2_summary}
+cat("Lambda (1-SE):", lassoOut$lambda.1se, "\n")
+cat("Features selected:", length(Srefitted), "\n")
+cat("Features excluded:", ncol(X) - length(Srefitted), "\n")
+
+# Display refitted regression coefficients
+print(betaHatRefitted)
+```
+
+Using the one-standard-error rule, the selected penalty parameter is **`r signif(lassoOut$lambda.1se, 4)`**. The Lasso model selected **`r length(Srefitted)`** out of
+**`r ncol(X)`** mutation features. These selected features were then refitted using ordinary
+least squares without the Lasso penalty. This approach separates variable selection from coefficient estimation, allowing the selected coefficients to be re-estimated without Lasso shrinkage.
+
+#### Answer 4.1.3
+
+What are the genes selected by the refitted lasso (that is, what are the 'geneLabels' (the feature names) that correspond to the nonzero coefficients in the coefficient vector)? 
+
+```{r}
+selectedGenes = geneLabels[Srefitted]
+
+cat('The selected genes from refitted lasso are: \n',
+     paste(selectedGenes, collapse = ", "),'\n')
+```
+
+**Answer 4.1.3**
+
+The Refitted Lasso selected **`r length(selectedGenes)`** mutation features using the one-standard-error rule. The selected genes are: **`r paste(selectedGenes, collapse = ", ")`**. These features were subsequently used in an ordinary least squares regression to obtain the refitted coefficients.
+
+### Problem 4.1.4
+
+For the refitted lasso, which gene is associated with the largest DECREASE in viral susceptibility (note: remember how the supervisor is coded) to this particular drug? 
+
+#### Answer 4.1.4
+
+```{r}
+# Exclude the intercept
+geneCoefficients = betaHatRefitted[-1]
+
+# Find the largest positive coefficient
+largestIndex = which.max(geneCoefficients)
+
+# Extract gene and coefficient
+largestGene = names(geneCoefficients)[largestIndex]
+largestCoefficient = unname(geneCoefficients[largestIndex])
+
+cat("Gene associated with the largest decrease in susceptibility:",
+    largestGene, "\n")
+
+cat("Estimated coefficient:",
+    largestCoefficient, "\n")
+```
+
+**Answer 4.1.4**
+
+
+Based on the Refitted Lasso model, the gene associated with the largest decrease in viral susceptibility is **`r largestGene`**, with an estimated regression coefficient
+of  **`r round(largestCoefficient, 4)`**.
+
+This gene has the largest positive coefficient among the selected predictors, indicating the strongest estimated increase in the log-transformed resistance response when the mutation is present, holding other selected mutations constant.
+
+#### Answer 4.1.5
+
+Interpret this estimated coefficient within the context of the problem
+
+**Answer 4.1.5**
+
+A change from no mutation to mutation at gene **`r largestGene`** is associated with an estimated increase of **`r round(largestCoefficient, 4)`** units in the log-transformed drug resistance response, holding all other selected mutations constant.
+
+Because the response appears to be on the base-10 log scale, a virus with the **`r largestGene`** mutation is estimated to be about $10^{`r round(largestCoefficient, 2)`} \approx$ **`r round(10^largestCoefficient)`-fold** more resistant than an otherwise identical virus without it.
+
+Since higher response values indicate greater drug resistance, this mutation is associated with decreased viral susceptibility to the treatment.
+
+## Problem 4.2. Prediction
+
+Now, let's look at some predictions made by these methods.  Use the following for the test set:
+  
+```{r}
+Xtest = hiv.test$x
+Ytest = hiv.test$y
+```
+
+Let's compute the test error (that is the loss evaluated on this test data)
+
+* ridge
+* lasso
+* refitted lasso
+
+We can get the predictions out via various 'predict' functions
+
+### Problem 4.2.1. Ridge regression at lambda.min
+
+Now that we are looking at prediction, we can use ridge regression (which mainly is used for prediction).  Using the package glmnet, let's plot the
+CV curve over the grid of lambda values and indicate the minimum, and finally report the CV
+estimate of the test error for ridge at each lambda.
+
+There is no need to report the p coefficient estimates from the ridge solution.
+Also, glmnet has a grid problem.  The automatically allocated grid by glmnet has a minimum value that is too small and hence we get a `boundary' solution. Let's make two plots, one that shows the CV plot with and one without this boundary issue
+
+```{r}
+ridgeOut = cv.glmnet(X,Y,alpha=0, foldid = foldid)
+plot(ridgeOut) #This has the boundary issue
+
+minLambda = min(ridgeOut$lambda)
+lambdaNew = seq(minLambda, minLambda*0.01,length=100)
+ridgeOut  = cv.glmnet(x = X, y = Y, alpha = 0,lambda = lambdaNew, foldid = foldid)
+plot(ridgeOut) 
+YhatTestRidge = predict(ridgeOut, Xtest, s = 'lambda.min')
+```
+
+#### Answer 4.2.1. 
+
+Why is a boundary solution for minimizing CV an issue?
+  
+**Answer 4.2.1**
+
+A boundary solution occurs when the minimum cross-validation error is found at the edge of the tested lambda grid. This is problematic because the optimal lambda may lie outside the original search range, so we cannot be certain that the minimum CV error has been identified.
+
+To address this, we extended the lambda grid toward smaller values and repeated cross-validation.
+
+The selected penalty parameter from the revised grid is **`r signif(ridgeOut$lambda.min, 4)`**.
+
+``` {r}
+# grid range
+range(ridgeOut$lambda)
+```
+
+lambda.min (**`r signif(ridgeOut$lambda.min, 4)`**) now lies strictly inside the grid, so the boundary issue is resolved.
+
+### Problem 4.2.2. Lasso
+  
+We can use the previously computed lasso object to get the predictions
+
+```{r}
+YhatTestLasso = predict(
+  lassoOut,
+  newx = Xtest,
+  s = "lambda.min"
+)
+```
+
+#### Answer 4.2.3. Refitted lasso 
+
+Get the predictions for the refitted lasso.  Remember, choose lambda via the 1se rule and then fit the least squares solution on the selected features.  
+
+```{r}
+XtestDF = as.data.frame(
+  Xtest[, Srefitted, drop = FALSE]
+)
+
+YhatTestRefitted = predict(
+  refittedOut,
+  newdata = XtestDF
+)
+```
+
+#### Answer 4.2.4. Getting the test errors
+
+```{r}
+# Get the test error
+testErrorRidge    = mean((Ytest - as.vector(YhatTestRidge))^2)
+testErrorLasso    = mean((Ytest - as.vector(YhatTestLasso))^2)
+testErrorRefitted = mean((Ytest - as.vector(YhatTestRefitted))^2)
+
+# Compare all models
+modelComparison = data.frame(
+  Model = c("Ridge", "Lasso", "Refitted Lasso"),
+  Test_MSE = c(
+    testErrorRidge,
+    testErrorLasso,
+    testErrorRefitted
+  )
+)
+
+modelComparison = modelComparison[
+  order(modelComparison$Test_MSE),
+]
+
+knitr::kable(
+  modelComparison,
+  digits = 5,
+  row.names = FALSE,
+  caption = "Test MSE comparison"
+)
+
+bestModel = modelComparison$Model[1]
+bestMSE = modelComparison$Test_MSE[1]
+```
+  
+  
+* The test error from ridge w/ lambda chosen as lambda.min is **`r round(testErrorRidge, 4)`**
+* The test error from lasso w/ lambda chosen as lambda.min is **`r round(testErrorLasso, 4)`**
+* The test error from refitted lasso is **`r round(testErrorRefitted, 4)`**
+
+Among the three methods, **`r bestModel`** achieves the lowest test MSE of **`r round(bestMSE, 4)`**, although performance may vary on other samples.
+
+The refitted lasso uses only **`r length(Srefitted)`** mutations versus **`r length(Slasso)`** for the lasso, yet its test MSE is only slightly higher. It trades very little accuracy for a much simpler model. Both sparse methods beat ridge, which suggests resistance is driven by a small number of mutations.
