@@ -1,0 +1,291 @@
+---
+title: "Multivariate Adaptive Regression Splines 2"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+
+## Prerequisites
+For this tutorial we will use the following packages:
+
+```{r packages}
+require(dplyr)
+require(earth)     # fit MARS models
+require(caret)     # automating the tuning process
+require(vip)       # variable importance
+require(glmnet)
+require(lattice)   # to plot digits
+require(pROC)
+```
+
+Also, here is a helper function for plotting the vectorized digit back into an image:
+
+```{r plotDigit}
+plotDigit = function(x,zlim=c(-1,1)) {
+  cols = gray.colors(100, start = 0, end = 1, rev=TRUE)
+  matObj = matrix(x,nrow=28)[,28:1]
+  mode(matObj) = 'numeric'
+  levelplot(matObj,col.regions=cols, xlab = '', ylab = '')
+}
+```
+
+# Digits data
+
+Let's look at the famous digits data set, in particular the hand drawn 1's and 2's
+
+```{r readData, cache = TRUE}
+training = read.csv('../../../data/digits_train.csv')
+Y = make.names(training$label)
+X = select(training, -label) %>% filter( Y == 'X1'| Y == 'X2')
+Y = as.factor(Y[Y == 'X1' | Y == 'X2'])
+
+set.seed(1)
+trainSplit = createDataPartition(y = Y, p = 0.8, list = FALSE)
+
+Ytrain = Y[trainSplit]
+Xtrain = X[trainSplit,]
+XtrainMat = as.matrix(Xtrain)
+Ytest  = Y[-trainSplit]
+Xtest  = X[-trainSplit,]
+XtestMat = as.matrix(Xtest)
+```
+
+Here are some example plots:
+
+```{r examplePlots}
+plotObj = vector('list',9)
+for(j in 1:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj)
+```
+
+Let's look at a fitting the logistic elastic net
+
+```{r logisticElasticNet, cache = TRUE}
+set.seed(1)
+K            = 2
+trainControl = trainControl(method = "cv", number = K)
+tuneGrid     = expand.grid('alpha'=c(.5,1),'lambda' = seq(0.0001, .01, length.out = 10))
+
+elasticOut   = train(x = Xtrain, y = Ytrain,
+                   method = "glmnet", 
+                   trControl = trainControl, tuneGrid = tuneGrid)
+elasticOut$bestTune
+```
+
+Using these selected tuning parameters, let's get some predictions on the test digits data
+
+```{r}
+glmnetOut      = glmnet(x = XtrainMat, y = relevel(Ytrain, ref = 'X2'), alpha = elasticOut$bestTune$alpha, family = 'binomial')
+probHatTestGlmnet = predict(glmnetOut, XtestMat, s=elasticOut$bestTune$lambda, type = 'response')
+YhatTestGlmnet    = ifelse(probHatTestGlmnet > 0.5, 'X1', 'X2')
+```
+
+The confusion matrix
+```{r}
+table(YhatTestGlmnet, Ytest)
+```
+
+We can look at the active set as well:
+```{r}
+betaHat  = coef(glmnetOut, s=elasticOut$bestTune$lambda)
+Sglmnet   = abs(betaHat[-1]) > 1e-16
+head(betaHat)
+```
+
+By looking at the estimated coefficients, we can gain insight into which pixels seem to be associated with 
+each digit.  Also, as the features are standardized, we can use the coefficient magnitude to rank the features in importance
+
+```{r importantGlmnet}
+importantGlmnet = betaHat[-1][Sglmnet] 
+
+importantDigit = rep(0,28**2)
+importantDigit[Sglmnet] = importantGlmnet/max(abs(importantGlmnet))
+
+plotDigit(importantDigit)
+```
+
+Let's compare these important pixels to a few digits from the training data
+```{r}
+plotObj = vector('list',9)
+plotObj[[1]] = plotDigit(importantDigit)
+for(j in 2:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj )
+```
+
+# MARS applied to classification
+
+Let's look at applying MARS to digits using the *caret* package
+
+```{r mars, cache = TRUE}
+fdaOut = train(x = Xtrain, 
+                y = Ytrain,
+                method = 'fda',
+                metric = 'Accuracy',
+                tuneGrid = expand.grid(degree = 1:3, nprune = c(10,20,50,100)),
+                trControl = trainControl(method='CV',number = 2,classProbs = TRUE))
+fdaOut
+plot(fdaOut)
+```
+
+We can also get the feature importance out
+```{r}
+fdaVip = vip(fdaOut,num_features = 40, bar = FALSE, metric = "Accuracy")
+plot(fdaVip)
+```
+
+We will record the features with nonzero importance.  Note that the measure of importance is quite different than the one used for glmnet.  We can look at the coefficients of the estimated model, but these coefficients aren't the same as the importance
+
+```{r}
+coef(fdaOut$finalModel)
+```
+
+Taking a look at the 350th pixel in the training data (this will be the 351st column)
+
+```{r}
+YtrainPlot = ifelse(Ytrain == 'X1',1,0)
+plot(Xtrain[,351],YtrainPlot, pch = 16, cex = .3)
+```
+
+Instead, let's look at the importance object we computed with *vip*
+
+```{r}
+important    = fdaVip$data$Variable[fdaVip$data$Importance > 1e-16]
+importantVal = fdaVip$data$Importance[fdaVip$data$Importance > 1e-16]
+#here we are getting the pixel number + 1 to get the feature index
+importantIndex = sapply(strsplit(important,'pixel'),function(x){return(as.numeric(x[2])+1)})
+
+importantDigit = rep(0,28**2)
+importantDigit[importantIndex] = importantVal/max(importantVal)
+
+plotDigit(importantDigit)
+head(coef(fdaOut$finalModel))
+```
+
+Again, comparing the importance plot to some digits from the training data
+```{r}
+plotObj = vector('list',9)
+plotObj[[1]] = plotDigit(importantDigit)
+for(j in 2:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj )
+```
+
+# Predictions on the test set
+
+Remember that when you see the word 'posterior' when looking at a classification method, you should think 'probability estimate'
+
+```{r }
+probHatTestFDA = predict(fdaOut$finalModel, Xtest, type='posterior')
+YhatTestFDA    = ifelse(probHatTestFDA[,1] > 0.5, 'X1', 'X2')
+```
+
+The confusion matrices
+```{r}
+table(YhatTestGlmnet, Ytest)
+table(YhatTestFDA, Ytest)
+```
+
+# ROC curves
+
+Let's directly compare the ROC curves.  The *roc* function expects the probability estimates to be vectors and right now the glmnet probability estimates are in a $n_test$ by 1 matrix. We can fix that:
+```{r}
+probHatTestGlmnet = as.numeric(probHatTestGlmnet)
+```
+
+```{r roc}
+rocOutGlmnet = roc(response = Ytest, probHatTestGlmnet)
+plot(rocOutGlmnet)
+rocOutFDA = roc(response = Ytest, probHatTestFDA[,1])
+plot(rocOutFDA, col = 'red', add = TRUE)
+```
+
+
+# Using all 10 classes
+
+Let's redo some of this process, but using all 10 classes.
+
+```{r readData2, cache = TRUE}
+Y = as.factor(make.names(training$label))
+X = select(training, -label) 
+
+set.seed(1)
+trainSplit = createDataPartition(y = Y, p = 0.35, list = FALSE)
+
+Ytrain = Y[trainSplit]
+Xtrain = X[trainSplit,]
+XtrainMat = as.matrix(Xtrain)
+Ytest  = Y[-trainSplit]
+Xtest  = X[-trainSplit,]
+XtestMat = as.matrix(Xtest)
+```
+
+We can still get the logistic elastic net output (technically, we are doing 'multinomial' regression, now.)
+
+```{r logisticElasticNet10, cache = TRUE, dependson = 'readData2'}
+set.seed(1)
+K            = 2
+trainControl = trainControl(method = "cv", number = K)
+tuneGrid     = expand.grid('alpha'=c(.5,1),'lambda' = seq(0.0001, .01, length.out = 10))
+
+start = proc.time()[3]
+elasticOut   = train(x = Xtrain, y = Ytrain,
+                   method = "glmnet", 
+                   trControl = trainControl, tuneGrid = tuneGrid)
+end = proc.time()[3]
+
+elasticOut$bestTune
+```
+
+This run took `r end - start` seconds.
+
+Here are the CV curves:
+
+```{r}
+plot(elasticOut)
+```
+
+```{r glmnet10class, cache = TRUE, dependson = c(-2,-3)}
+glmnetOut      = glmnet(x = XtrainMat, y = Ytrain, alpha = elasticOut$bestTune$alpha, family = 'multinomial')
+YhatTestGlmnet = predict(glmnetOut, XtestMat, s=elasticOut$bestTune$lambda, type = 'class')
+```
+
+Now, let's get the MARS model
+
+```{r mars10, cache = TRUE, dependson = 'readData2'}
+start = proc.time()[3]
+fdaOut = train(x = Xtrain, 
+                y = Ytrain,
+                method = 'fda',
+                metric = 'Accuracy',
+                tuneGrid = expand.grid(degree = 1:3, nprune = c(10,20,50,100)),
+                trControl = trainControl(method='CV', number = K, classProbs = TRUE))
+end = proc.time()[3]
+fdaOut
+plot(fdaOut)
+```
+
+Getting the MARS fit took `r end - start` seconds.
+
+```{r }
+YhatTestFDA    = predict(fdaOut$finalModel, Xtest, type='class')
+```
+
+
+The confusion matrices
+```{r}
+table(YhatTestGlmnet, Ytest)
+table(YhatTestFDA, Ytest)
+```
+
+Test accuracy rates:
+```{r}
+sum(diag(table(YhatTestGlmnet, Ytest)))/length(Ytest)
+sum(diag(table(YhatTestFDA, Ytest)))/length(Ytest)
+```

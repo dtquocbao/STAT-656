@@ -1,0 +1,296 @@
+---
+title: "Homework 5: Classification"
+subtitle: 'STAT656'
+output: html_document
+---
+
+# Digits data
+
+In this assignment, we are going to revisit the digits data example from class.  For more information about this, see the posted lectures videos (Parts 1 through 5) and marsAndFDA2.Rmd. 
+
+Following the discussion in class, let's look at hand draw 5s and 8s
+
+# Packages and helper function
+
+```{r packages}
+require(dplyr)
+require(earth)     # fit MARS models
+require(caret)     # automating the tuning process
+require(vip)       # variable importance
+require(glmnet)
+require(lattice)   # to plot digits
+require(gridExtra) # to plot digits (grid.arrange)
+require(pROC)
+require(neuralnet)
+```
+
+You will also need the 'mda' package for the MARS model.
+
+Also, here is a helper function for plotting the vectorized digit back into an image:
+
+```{r plotDigit}
+plotDigit = function(x) {
+  cols = gray.colors(100, start = 0, end = 1, rev=TRUE)
+  matObj = matrix(x,nrow=28)[,28:1]
+  mode(matObj) = 'numeric'
+  levelplot(matObj,col.regions=cols, xlab = '', ylab = '')
+}
+```
+
+
+Let's read in the data set. 
+
+```{r readData, cache = TRUE}
+training = read.csv('digits.csv')
+Y = make.names(training$label)
+X = select(training, -label) %>% filter( Y == 'X5'| Y == 'X8')
+Y = as.factor(Y[Y == 'X5' | Y == 'X8'])
+
+set.seed(1)
+trainSplit = createDataPartition(y = Y, p = 0.8, list = FALSE)
+
+Ytrain = Y[trainSplit]
+Xtrain = X[trainSplit,]
+XtrainMat = as.matrix(Xtrain)
+Ytest  = Y[-trainSplit]
+Xtest  = X[-trainSplit,]
+XtestMat = as.matrix(Xtest)
+```
+
+
+Here are some example plots:
+
+```{r examplePlots}
+plotObj = vector('list',9)
+for(j in 1:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj)
+```
+
+
+# Problem 1 (30 pts). Logistic elastic net.
+
+Let's look at a fitting the logistic elastic net
+
+```{r logisticElasticNet, cache = TRUE}
+set.seed(1)
+K            = 5
+trainControl = trainControl(method = "cv", number = K)
+tuneGrid     = expand.grid('alpha'=c(.5, 1),'lambda' = seq(0.0001, .01, length.out = 10))
+
+elasticOut   = #### Answer 1.1
+
+elasticOut$bestTune
+```
+
+Using these selected tuning parameters, let's get some predictions on the test digits data
+
+```{r}
+glmnetOut         = glmnet(x = XtrainMat, y = relevel(Ytrain, ref = 'X8'), 
+                           alpha = elasticOut$bestTune$alpha, family = 'binomial')
+probHatTestGlmnet = predict(glmnetOut, XtestMat, s=elasticOut$bestTune$lambda, type = 'response')
+YhatTestGlmnet    = #### Answer 1.2
+```
+
+
+We can look at the active set as well.  For this assignment, just to make the picture easier to explain, we will use a threshold of 0.005 instead of something near 0.
+
+```{r}
+betaHat = coef(glmnetOut, s=elasticOut$bestTune$lambda)
+Sglmnet = abs(betaHat[-1]) > .005
+```
+
+By looking at the estimated coefficients, we can gain insight into which pixels seem to be associated with 
+each digit.  Also, as the features are standardized, we can use the coefficient magnitude to rank the features in importance
+
+```{r importantGlmnet}
+importantGlmnet = betaHat[-1][Sglmnet] 
+
+importantDigit = rep(0,28**2)
+importantDigit[Sglmnet] = importantGlmnet/max(abs(importantGlmnet))
+
+plotDigit(importantDigit)
+```
+
+Let's compare these important pixels to a few digits from the training data
+
+```{r}
+plotObj = vector('list',9)
+plotObj[[1]] = plotDigit(importantDigit)
+for(j in 2:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj )
+```
+
+#### Answer 1.3
+
+Describe this image by identifying pixels that seem to be positively associated with Y = 'X5' and positively associated with Y = 'X8'.
+
+
+# Problem 2 (40 points). MARS applied to classification
+
+### Problem 2.1
+
+Let's look at applying MARS to digits using the *caret* package
+
+```{r mars, cache = TRUE}
+fdaOut = train(x = Xtrain, 
+                y = Ytrain,
+                method = 'fda',
+                metric = 'Accuracy',
+                tuneGrid = expand.grid(degree = 1:3, nprune = c(10,20,50,100)),
+                trControl = trainControl(method='CV',number = K, classProbs = TRUE))
+fdaOut
+plot(fdaOut)
+```
+
+#### Answer 2.1
+
+What values of degree and nprune are selected by maximizing CV accuracy?
+
+### Problem 2.2
+
+We can also get the feature importance out
+```{r}
+fdaVip = vip(fdaOut,num_features = 40, bar = FALSE, metric = "Accuracy")
+plot(fdaVip)
+```
+
+#### Answer 2.2
+
+Which pixel is the most important for discriminating between 5 and 8?  How could you go about getting a general idea if that pixel is associated with the class '5' or '8'?  Which do you conclude?
+
+```{r coefficients}
+head(coef(fdaOut$finalModel))
+```
+
+### Problem 2.3
+
+Let's look at the importance object we computed with *vip*
+
+```{r}
+important    = fdaVip$data$Variable[fdaVip$data$Importance > 1e-16]
+importantVal = fdaVip$data$Importance[fdaVip$data$Importance > 1e-16]
+#here we are getting the pixel number + 1 to get the feature index
+importantIndex = sapply(strsplit(important,'pixel'),function(x){return(as.numeric(x[2])+1)})
+
+importantDigit = rep(0,28**2)
+importantDigit[importantIndex] = importantVal/max(importantVal)
+
+plotDigit(importantDigit)
+```
+
+Again, comparing the importance plot to some digits from the training data
+
+```{r}
+plotObj = vector('list',9)
+plotObj[[1]] = plotDigit(importantDigit)
+for(j in 2:9){
+	plotObj[[j]] = plotDigit(X[j,])	
+}
+do.call(grid.arrange, plotObj )
+```
+
+#### Answer 2.3.
+
+Why do you think these pixels would be important for discriminating between Y = 'X5' and Y = 'X8'.
+
+# Predictions on the test set
+
+Remember that when you see the word 'posterior' when looking at a classification method, you should think 'probability estimate'
+
+```{r }
+probHatTestFDA = predict(fdaOut$finalModel, Xtest, type='posterior')
+YhatTestFDA    =  #### Answer 2.3.1
+```
+
+The confusion matrices
+```{r}
+#### Answer 2.3.2
+#### Answer 2.3.3
+```
+
+#### Answer 2.4. 
+
+Which method has the highest sensitivity and what is that sensitivity?
+
+#### Answer 2.5. 
+
+Which method has the highest specificity and what is that specificity?
+
+#### Answer 2.6. 
+
+Which method has the highest precision and what is that precision?
+
+# ROC curves
+
+Let's directly compare the ROC curves.  The *roc* function expects the probability estimates to be vectors and right now the glmnet probability estimates are in a $n_test$ by 1 matrix. We can fix that:
+```{r}
+probHatTestGlmnet = as.numeric(probHatTestGlmnet)
+```
+
+```{r roc}
+rocOutGlmnet = roc(response = Ytest, probHatTestGlmnet)
+plot(rocOutGlmnet)
+rocOutFDA = roc(response = Ytest, probHatTestFDA[,1])
+plot(rocOutFDA, col = 'red', add = TRUE)
+```
+
+#### Answer 2.7. 
+
+Which method has the highest AUC?
+```{r}
+#### Answer 2.7.1
+#### Answer 2.7.2
+```
+
+
+# Problem 3. (30 pts) Neural networks
+
+### Problem 3.1
+Let's fit a simple neural network to these data as well
+
+```{r neuralNet, cache = TRUE}
+set.seed(1)
+nnOut = neuralnet(Ytrain~.,data=Xtrain, 
+                  hidden=2, rep = 3, 
+                  err.fct = 'ce', linear.output = FALSE)
+
+Wrep1 = nnOut$weights[[1]][[1]]
+Wrep2 = nnOut$weights[[2]][[1]]
+Wrep3 = nnOut$weights[[3]][[1]]
+W = (Wrep1 + Wrep2 + Wrep3)/3
+
+plot(W[-1,],type='n',xlab='W_1',ylab='W_2')
+text(W[-1,],names(X),cex=.25)
+```
+
+#### Answer 3.1
+
+Which pixels appear to be most different based on the first hidden unit (W_1)?  Which pixels appear to be most different based on the second hidden unit (W_2)? As a reminder, these Ws are the same as the 'gammas' from the lecture notes.
+
+### Problem 3.2
+
+We will get predictions with the neural network model.  We will average the probability estimates from each of the three model fits (from 3 different random starting values.  Remember: the solution you get with neural networks depends on where you started)
+
+```{r}
+pHatNN1 = predict(nnOut, Xtest, rep = 1)
+pHatNN2 = predict(nnOut, Xtest, rep = 2)
+pHatNN3 = predict(nnOut, Xtest, rep = 3)
+
+pHatNN  = (pHatNN1 + pHatNN2 + pHatNN3)/3
+
+YhatTestNN    = ifelse(pHatNN[,1] > 0.5, 'X5', 'X8')
+
+table(YhatTestNN, Ytest)
+```
+
+#### Answer 3.2
+
+These results are much worse than for FDA or logistic elastic net.  What strategies could you employ to improve the neural network results?
+
+# Extra credit (10 pts)
+
+Attempt one of the strategies you suggested in the previous answer.  Report the new test confusion matric. Did it improve the test accuracy?
