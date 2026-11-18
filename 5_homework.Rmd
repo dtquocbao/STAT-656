@@ -22,6 +22,7 @@ require(lattice)   # to plot digits
 require(gridExtra) # to plot digits (grid.arrange)
 require(pROC)
 require(neuralnet)
+require(mda)
 ```
 
 You will also need the 'mda' package for the MARS model.
@@ -79,7 +80,13 @@ K            = 5
 trainControl = trainControl(method = "cv", number = K)
 tuneGrid     = expand.grid('alpha'=c(.5, 1),'lambda' = seq(0.0001, .01, length.out = 10))
 
-elasticOut   = #### Answer 1.1
+elasticOut = train(
+  x = Xtrain,
+  y = Ytrain,
+  method = "glmnet",
+  trControl = trainControl,
+  tuneGrid = tuneGrid
+)
 
 elasticOut$bestTune
 ```
@@ -90,7 +97,17 @@ Using these selected tuning parameters, let's get some predictions on the test d
 glmnetOut         = glmnet(x = XtrainMat, y = relevel(Ytrain, ref = 'X8'), 
                            alpha = elasticOut$bestTune$alpha, family = 'binomial')
 probHatTestGlmnet = predict(glmnetOut, XtestMat, s=elasticOut$bestTune$lambda, type = 'response')
-YhatTestGlmnet    = #### Answer 1.2
+YhatTestGlmnet    = ifelse(
+  probHatTestGlmnet > 0.5,
+  "X5",
+  "X8"
+)
+
+confusionMatrix(
+  data = factor(YhatTestGlmnet, levels = c("X5", "X8")),
+  reference = factor(Ytest, levels = c("X5", "X8")),
+  positive = "X5"
+)
 ```
 
 
@@ -119,7 +136,7 @@ Let's compare these important pixels to a few digits from the training data
 plotObj = vector('list',9)
 plotObj[[1]] = plotDigit(importantDigit)
 for(j in 2:9){
-	plotObj[[j]] = plotDigit(X[j,])	
+  plotObj[[j]] = plotDigit(X[j,])	
 }
 do.call(grid.arrange, plotObj )
 ```
@@ -128,6 +145,7 @@ do.call(grid.arrange, plotObj )
 
 Describe this image by identifying pixels that seem to be positively associated with Y = 'X5' and positively associated with Y = 'X8'.
 
+The elastic net model identifies important pixels through the magnitude and sign of their estimated coefficients. Because digit 5 is treated as the positive class, positive coefficients increase the predicted log-odds of digit 5, while negative coefficients increase the relative evidence for digit 8. Coefficients close to zero contribute relatively little to the prediction, and coefficients equal to zero have been excluded by regularization. The important pixels represent locations where the shapes of digits 5 and 8 differ.
 
 # Problem 2 (40 points). MARS applied to classification
 
@@ -144,13 +162,35 @@ fdaOut = train(x = Xtrain,
                 trControl = trainControl(method='CV',number = K, classProbs = TRUE))
 fdaOut
 plot(fdaOut)
+
+fdaOut$bestTune
 ```
 
 #### Answer 2.1
 
 What values of degree and nprune are selected by maximizing CV accuracy?
 
+The five-fold cross-validation selected a MARS/FDA model with degree = 3 and nprune = 50. The degree parameter allows interactions among up to three predictors, while nprune controls the maximum number of terms retained in the model.
+
+The cross-validation plot shows that degree 3 consistently achieves higher accuracy than degrees 1 and 2. Accuracy improves as the number of terms increases from 10 to 50, but there is little additional improvement beyond 50 terms. The selected model achieves approximately 96.1% cross-validation accuracy, suggesting that nonlinear interactions among pixels are useful for distinguishing handwritten digits 5 and 8.
+
 ### Problem 2.2
+
+``` {r}
+# Predict classes on the test set
+YhatTestFDA = predict(
+  fdaOut$finalModel,
+  Xtest,
+  type = "class"
+)
+
+# Calculate confusion matrix
+confusionMatrix(
+  data = factor(YhatTestFDA, levels = c("X5", "X8")),
+  reference = factor(Ytest, levels = c("X5", "X8")),
+  positive = "X5"
+)
+```
 
 We can also get the feature importance out
 ```{r}
@@ -164,17 +204,29 @@ Which pixel is the most important for discriminating between 5 and 8?  How could
 
 ```{r coefficients}
 head(coef(fdaOut$finalModel))
+
+tapply(Xtrain$pixel488, Ytrain, mean)
 ```
+
+Pixel 488 is among the most important pixels identified by the FDA model. To determine which digit it is associated with, I compared its average intensity between the two classes. The mean intensity is approximately 27.47 for digit 5 and 168.33 for digit 8. Therefore, higher intensity at pixel 488 is strongly associated with digit 8 in the training data.
 
 ### Problem 2.3
 
 Let's look at the importance object we computed with *vip*
-
+  
 ```{r}
-important    = fdaVip$data$Variable[fdaVip$data$Importance > 1e-16]
-importantVal = fdaVip$data$Importance[fdaVip$data$Importance > 1e-16]
-#here we are getting the pixel number + 1 to get the feature index
-importantIndex = sapply(strsplit(important,'pixel'),function(x){return(as.numeric(x[2])+1)})
+important = as.character(
+  fdaVip$data$Variable[fdaVip$data$Importance > 1e-16]
+)
+
+importantVal = fdaVip$data$Importance[
+  fdaVip$data$Importance > 1e-16
+]
+
+# Extract pixel number and add 1 for the feature index
+importantIndex = as.numeric(
+  sub("pixel", "", important)
+) + 1
 
 importantDigit = rep(0,28**2)
 importantDigit[importantIndex] = importantVal/max(importantVal)
@@ -188,7 +240,7 @@ Again, comparing the importance plot to some digits from the training data
 plotObj = vector('list',9)
 plotObj[[1]] = plotDigit(importantDigit)
 for(j in 2:9){
-	plotObj[[j]] = plotDigit(X[j,])	
+  plotObj[[j]] = plotDigit(X[j,])	
 }
 do.call(grid.arrange, plotObj )
 ```
@@ -197,35 +249,59 @@ do.call(grid.arrange, plotObj )
 
 Why do you think these pixels would be important for discriminating between Y = 'X5' and Y = 'X8'.
 
+These pixels are likely important because handwritten 5s and 8s have different stroke patterns. Digit 8 typically contains two connected loops, while digit 5 has a different upper and middle structure. Pixels located in regions where these shapes differ can provide useful information for classification. For example, pixel488 has a much higher average intensity for digit 8, suggesting that this location is more frequently occupied by a stroke in handwritten 8s than in 5s.
+
 # Predictions on the test set
 
 Remember that when you see the word 'posterior' when looking at a classification method, you should think 'probability estimate'
 
 ```{r }
 probHatTestFDA = predict(fdaOut$finalModel, Xtest, type='posterior')
-YhatTestFDA    =  #### Answer 2.3.1
+YhatTestFDA    =  factor(
+  ifelse(probHatTestFDA[, "X5"] > 0.5, "X5", "X8"),
+  levels = levels(Ytest)
+)
 ```
 
 The confusion matrices
 ```{r}
 #### Answer 2.3.2
+confusionMatrix(
+  data = factor(YhatTestGlmnet, levels = levels(Ytest)),
+  reference = Ytest,
+  positive = "X5"
+)
+
 #### Answer 2.3.3
+confusionMatrix(
+  data = YhatTestFDA,
+  reference = Ytest,
+  positive = "X5"
+)
 ```
+
 
 #### Answer 2.4. 
 
 Which method has the highest sensitivity and what is that sensitivity?
 
-#### Answer 2.5. 
+MARS/FDA has the highest sensitivity of 0.9723 (97.23%), compared with 0.9684 (96.84%) for logistic elastic net. Therefore, MARS/FDA performs slightly better at correctly identifying handwritten 5s.
 
+#### Answer 2.5. 
+  
 Which method has the highest specificity and what is that specificity?
 
+Logistic elastic net has the highest specificity of 0.9692 (96.92%), compared with 0.9655 (96.55%) for MARS/FDA. Therefore, logistic elastic net performs slightly better at correctly identifying handwritten 8s.
+
+  
 #### Answer 2.6. 
 
 Which method has the highest precision and what is that precision?
 
-# ROC curves
+Logistic elastic net has the highest precision of 0.9671 (96.71%), compared with 0.9634 (96.34%) for MARS/FDA. Therefore, logistic elastic net is slightly more precise when predicting handwritten 5s.
 
+# ROC curves
+  
 Let's directly compare the ROC curves.  The *roc* function expects the probability estimates to be vectors and right now the glmnet probability estimates are in a $n_test$ by 1 matrix. We can fix that:
 ```{r}
 probHatTestGlmnet = as.numeric(probHatTestGlmnet)
@@ -236,6 +312,16 @@ rocOutGlmnet = roc(response = Ytest, probHatTestGlmnet)
 plot(rocOutGlmnet)
 rocOutFDA = roc(response = Ytest, probHatTestFDA[,1])
 plot(rocOutFDA, col = 'red', add = TRUE)
+
+legend(
+  "bottomright",
+  legend = c("Elastic Net", "FDA"),
+  col = c("blue", "red"),
+  lty = 1
+)
+
+auc(rocOutGlmnet)
+auc(rocOutFDA)
 ```
 
 #### Answer 2.7. 
@@ -243,9 +329,12 @@ plot(rocOutFDA, col = 'red', add = TRUE)
 Which method has the highest AUC?
 ```{r}
 #### Answer 2.7.1
-#### Answer 2.7.2
-```
+auc(rocOutGlmnet)
 
+#### Answer 2.7.2
+auc(rocOutFDA)
+```
+The FDA model achieves a slightly higher test AUC (0.9954) than the elastic net model (0.9932). This indicates that FDA has slightly better overall discrimination between digits 5 and 8 across classification thresholds. Although both models have approximately the same test accuracy at the 0.5 threshold, FDA performs marginally better when considering the full ROC curve.
 
 # Problem 3. (30 pts) Neural networks
 
@@ -269,7 +358,21 @@ text(W[-1,],names(X),cex=.25)
 
 #### Answer 3.1
 
-Which pixels appear to be most different based on the first hidden unit (W_1)?  Which pixels appear to be most different based on the second hidden unit (W_2)? As a reminder, these Ws are the same as the 'gammas' from the lecture notes.
+``` {r}
+head(
+  sort(abs(W[-1, 1]), decreasing = TRUE),
+  10
+)
+
+head(
+  sort(abs(W[-1, 2]), decreasing = TRUE),
+  10
+)
+```
+
+For the first hidden unit (W1), pixels 118, 424, and 666 appear among those with the most extreme weights. For the second hidden unit (W2), pixels 93, 424, 425, and 666 appear particularly influential. Large absolute weights indicate pixels that strongly affect the corresponding hidden unit, while the sign determines the direction of that effect.
+
+Because the weights are averaged across three neural network repetitions, their interpretation should be treated cautiously. Hidden units can represent similar patterns with different ordering across training runs, so averaging corresponding weights does not necessarily preserve their original meaning.
 
 ### Problem 3.2
 
@@ -289,8 +392,68 @@ table(YhatTestNN, Ytest)
 
 #### Answer 3.2
 
-These results are much worse than for FDA or logistic elastic net.  What strategies could you employ to improve the neural network results?
+Neural network performance may be improved by adjusting the number of hidden units, experimenting with different network architectures, normalizing the input features, and tuning training parameters. Increasing the number of hidden units may allow the network to capture more complex nonlinear relationships, although it can also increase overfitting. Cross-validation or a separate validation set should be used to select the architecture before evaluating the final model on the test set.
 
 # Extra credit (10 pts)
+  
+Attempt one of the strategies you suggested in the previous answer. Report the new test confusion matric. Did it improve the test accuracy?
 
-Attempt one of the strategies you suggested in the previous answer.  Report the new test confusion matric. Did it improve the test accuracy?
+## Increase hidden neurons from 2 to 10
+``` {r}
+set.seed(1)
+
+nnImproved = neuralnet(
+  Ytrain ~ .,
+  data = Xtrain,
+  hidden = 10,
+  rep = 3,
+  err.fct = "ce",
+  linear.output = FALSE
+)
+```
+
+## Generate test predictions
+
+``` {r}
+
+pHatImproved1 = predict(nnImproved, Xtest, rep = 1)
+pHatImproved2 = predict(nnImproved, Xtest, rep = 2)
+pHatImproved3 = predict(nnImproved, Xtest, rep = 3)
+
+pHatImproved = (
+  pHatImproved1 +
+  pHatImproved2 +
+  pHatImproved3
+) / 3
+
+YhatTestImproved = ifelse(
+  pHatImproved[, 1] > 0.5,
+  "X5",
+  "X8"
+)
+```
+
+## Generate the new confusion matrix
+
+```{r}
+
+# New confusion matrix
+table(YhatTestImproved, Ytest)
+
+# Calculate test accuracy
+improvedAccuracy = mean(YhatTestImproved == Ytest)
+
+# Original neural network accuracy
+originalAccuracy = mean(YhatTestNN == Ytest)
+
+# Compare
+data.frame(
+  Model = c("Original NN (2 units)", "Improved NN (10 units)"),
+  Accuracy = c(originalAccuracy, improvedAccuracy)
+)
+
+```
+
+I increased the number of hidden units from 2 to 10 to investigate whether a larger neural network could improve classification performance. The original network achieved 93.13% test accuracy, while the modified network achieved 95.54%, an improvement of approximately 2.42 percentage points.
+
+The number of misclassified observations decreased from 108 to 70. This suggests that the larger network was better able to capture useful patterns in this experiment. However, additional validation would be necessary to determine whether this improvement generalizes reliably, since increasing model complexity can also increase the risk of overfitting.
